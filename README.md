@@ -29,6 +29,50 @@ python3 entropy_monitor.py -t 256 -i 1.0
 python3 entropy_monitor.py --check --json
 ```
 
+## Configuration file
+
+The monitor can read settings from a JSON configuration file. It searches for config in these locations (first match wins):
+
+1. `.entropy_monitor.json` (current directory)
+2. `~/.config/entropy_monitor/config.json` (user config)
+3. `/etc/entropy_monitor/config.json` (system config)
+
+### Configuration options
+
+```json
+{
+  "threshold": 512,
+  "interval": 2.0,
+  "max_history": 100,
+  "log_file": "/var/log/entropy_monitor.log",
+  "alert_command": "notify-send 'Low Entropy' 'Entropy pool is below threshold'"
+}
+```
+
+- **threshold**: Alert when entropy drops below this value (bits)
+- **interval**: Time between checks in seconds
+- **max_history**: Number of readings to keep for session statistics
+- **log_file**: Optional path to append log entries
+- **alert_command**: Shell command to run when entropy is low
+
+### Config management commands
+
+```bash
+# Generate a sample config file
+python3 entropy_monitor.py --generate-config
+
+# Generate config to specific location
+python3 entropy_monitor.py --generate-config --config /path/to/config.json
+
+# Show current configuration
+python3 entropy_monitor.py --show-config
+
+# Use a specific config file
+python3 entropy_monitor.py --config /path/to/config.json
+```
+
+Command-line arguments override configuration file values.
+
 ## What the numbers mean
 
 - **Pool size**: Usually 4096 bits on modern kernels (256 bits on older ones)

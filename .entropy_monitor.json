@@ -1,0 +1,7 @@
+{
+  "threshold": 512,
+  "interval": 2.0,
+  "max_history": 100,
+  "log_file": null,
+  "alert_command": null
+}
