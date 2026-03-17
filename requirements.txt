@@ -1,0 +1,4 @@
+# No external dependencies required
+# This project uses only Python standard library modules:
+# - os, sys, time, signal, argparse
+# - datetime, pathlib, json
