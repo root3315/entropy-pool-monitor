@@ -8,23 +8,29 @@ import sys
 import time
 import signal
 import argparse
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from config import load_config, DEFAULT_CONFIG, CONFIG_SEARCH_PATHS
+
 ENTROPY_AVAIL_PATH = "/proc/sys/kernel/random/entropy_avail"
 ENTROPY_POOL_SIZE_PATH = "/proc/sys/kernel/random/poolsize"
-DEFAULT_THRESHOLD = 512
-DEFAULT_INTERVAL = 2.0
 
 
 class EntropyMonitor:
-    def __init__(self, threshold=DEFAULT_THRESHOLD, interval=DEFAULT_INTERVAL):
+    def __init__(self, threshold=DEFAULT_CONFIG["threshold"], 
+                 interval=DEFAULT_CONFIG["interval"],
+                 max_history=DEFAULT_CONFIG["max_history"],
+                 log_file=None, alert_command=None):
         self.threshold = threshold
         self.interval = interval
+        self.max_history = max_history
+        self.log_file = log_file
+        self.alert_command = alert_command
         self.running = True
         self.alerts_triggered = 0
         self.history = []
-        self.max_history = 100
 
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -67,6 +73,13 @@ class EntropyMonitor:
         log_line = f"[{timestamp}] Entropy: {available:4d}/{pool_size} [{bar}] {percentage:5.1f}% | Status: {status}"
         print(log_line)
 
+        if self.log_file:
+            try:
+                with open(self.log_file, 'a') as f:
+                    f.write(log_line + "\n")
+            except IOError:
+                pass
+
         self.history.append({
             "timestamp": timestamp,
             "available": available,
@@ -85,6 +98,17 @@ class EntropyMonitor:
         alert_msg += "   Cryptographic operations may be slow or insecure.\n"
         alert_msg += "   Consider installing rng-tools or haveged.\n"
         print(alert_msg, file=sys.stderr)
+
+        if self.alert_command:
+            try:
+                subprocess.run(
+                    self.alert_command,
+                    shell=True,
+                    capture_output=True,
+                    timeout=5
+                )
+            except (subprocess.SubprocessError, OSError):
+                pass
 
     def check_entropy_sources(self):
         sources = []
@@ -139,6 +163,10 @@ class EntropyMonitor:
         print(f"Threshold: {self.threshold} bits")
         print(f"Interval: {self.interval}s")
         print(f"Monitoring /proc/sys/kernel/random/entropy_avail")
+        if self.log_file:
+            print(f"Log file: {self.log_file}")
+        if self.alert_command:
+            print(f"Alert command: {self.alert_command}")
         print("=" * 70)
         print()
 
@@ -199,20 +227,22 @@ class EntropyMonitor:
 
 
 def main():
+    config = load_config()
+
     parser = argparse.ArgumentParser(
         description="Monitor system entropy pool levels for cryptographic operations"
     )
     parser.add_argument(
         "-t", "--threshold",
         type=int,
-        default=DEFAULT_THRESHOLD,
-        help=f"Alert threshold in bits (default: {DEFAULT_THRESHOLD})"
+        default=config.get("threshold", DEFAULT_CONFIG["threshold"]),
+        help=f"Alert threshold in bits (default: {config.get('threshold', DEFAULT_CONFIG['threshold'])})"
     )
     parser.add_argument(
         "-i", "--interval",
         type=float,
-        default=DEFAULT_INTERVAL,
-        help=f"Monitoring interval in seconds (default: {DEFAULT_INTERVAL})"
+        default=config.get("interval", DEFAULT_CONFIG["interval"]),
+        help=f"Monitoring interval in seconds (default: {config.get('interval', DEFAULT_CONFIG['interval'])})"
     )
     parser.add_argument(
         "-c", "--check",
@@ -224,10 +254,58 @@ def main():
         action="store_true",
         help="Output single check as JSON"
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to configuration file (default: search standard locations)"
+    )
+    parser.add_argument(
+        "--generate-config",
+        action="store_true",
+        help="Generate a sample configuration file and exit"
+    )
+    parser.add_argument(
+        "--show-config",
+        action="store_true",
+        help="Show current configuration and exit"
+    )
 
     args = parser.parse_args()
 
-    monitor = EntropyMonitor(threshold=args.threshold, interval=args.interval)
+    if args.generate_config:
+        from config import generate_sample_config, save_config
+        sample = generate_sample_config()
+        if args.config:
+            save_path = save_config(sample, args.config)
+        else:
+            save_path = save_config(sample)
+        print(f"Configuration written to: {save_path}")
+        sys.exit(0)
+
+    if args.show_config:
+        if args.config:
+            config = load_config(args.config)
+        print("Current configuration:")
+        for key, value in config.items():
+            print(f"  {key}: {value}")
+        sys.exit(0)
+
+    if args.config:
+        config = load_config(args.config)
+
+    threshold = args.threshold
+    interval = args.interval
+    max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
+    log_file = config.get("log_file")
+    alert_command = config.get("alert_command")
+
+    monitor = EntropyMonitor(
+        threshold=threshold,
+        interval=interval,
+        max_history=max_history,
+        log_file=log_file,
+        alert_command=alert_command
+    )
 
     if args.check or args.json:
         available = monitor.read_entropy_avail()
@@ -248,16 +326,16 @@ def main():
                 "available": available,
                 "pool_size": pool_size,
                 "percentage": round(percentage, 2),
-                "threshold": args.threshold,
-                "status": "ok" if available >= args.threshold else "low"
+                "threshold": threshold,
+                "status": "ok" if available >= threshold else "low"
             }
             print(json.dumps(output, indent=2))
         else:
             print(f"Available entropy: {available} bits")
             print(f"Pool size: {pool_size} bits")
             print(f"Usage: {percentage:.1f}%")
-            if available < args.threshold:
-                print(f"Status: WARNING - Below threshold ({args.threshold} bits)")
+            if available < threshold:
+                print(f"Status: WARNING - Below threshold ({threshold} bits)")
                 sys.exit(1)
             else:
                 print("Status: OK")
