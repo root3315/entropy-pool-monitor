@@ -17,9 +17,12 @@ from config import load_config, DEFAULT_CONFIG, CONFIG_SEARCH_PATHS
 ENTROPY_AVAIL_PATH = "/proc/sys/kernel/random/entropy_avail"
 ENTROPY_POOL_SIZE_PATH = "/proc/sys/kernel/random/poolsize"
 
+READ_RETRIES = 3
+READ_RETRY_DELAY = 0.1
+
 
 class EntropyMonitor:
-    def __init__(self, threshold=DEFAULT_CONFIG["threshold"], 
+    def __init__(self, threshold=DEFAULT_CONFIG["threshold"],
                  interval=DEFAULT_CONFIG["interval"],
                  max_history=DEFAULT_CONFIG["max_history"],
                  log_file=None, alert_command=None):
@@ -39,24 +42,48 @@ class EntropyMonitor:
         self.running = False
 
     def read_entropy_avail(self):
-        try:
-            with open(ENTROPY_AVAIL_PATH, 'r') as f:
-                return int(f.read().strip())
-        except FileNotFoundError:
-            return -1
-        except PermissionError:
-            return -2
-        except ValueError:
-            return -3
+        last_error = None
+        for attempt in range(READ_RETRIES):
+            try:
+                with open(ENTROPY_AVAIL_PATH, 'r') as f:
+                    return int(f.read().strip())
+            except FileNotFoundError:
+                last_error = -1
+                break
+            except PermissionError:
+                last_error = -2
+                break
+            except ValueError:
+                last_error = -3
+                break
+            except (IOError, OSError):
+                last_error = -4
+                if attempt < READ_RETRIES - 1:
+                    time.sleep(READ_RETRY_DELAY * (2 ** attempt))
+                continue
+
+        return last_error
 
     def read_pool_size(self):
-        try:
-            with open(ENTROPY_POOL_SIZE_PATH, 'r') as f:
-                return int(f.read().strip())
-        except FileNotFoundError:
-            return 4096
-        except PermissionError:
-            return 4096
+        last_error = None
+        for attempt in range(READ_RETRIES):
+            try:
+                with open(ENTROPY_POOL_SIZE_PATH, 'r') as f:
+                    return int(f.read().strip())
+            except FileNotFoundError:
+                return 4096
+            except PermissionError:
+                return 4096
+            except ValueError:
+                if attempt < READ_RETRIES - 1:
+                    time.sleep(READ_RETRY_DELAY * (2 ** attempt))
+                continue
+            except (IOError, OSError):
+                if attempt < READ_RETRIES - 1:
+                    time.sleep(READ_RETRY_DELAY * (2 ** attempt))
+                continue
+
+        return 4096
 
     def get_entropy_percentage(self, available, pool_size):
         if pool_size <= 0:
@@ -143,7 +170,8 @@ class EntropyMonitor:
             error_messages = {
                 -1: "ERROR: Cannot access entropy_avail - file not found",
                 -2: "ERROR: Permission denied reading entropy_avail",
-                -3: "ERROR: Invalid value in entropy_avail"
+                -3: "ERROR: Invalid value in entropy_avail",
+                -4: "ERROR: Failed to read entropy_avail after retries",
             }
             print(error_messages.get(available, "ERROR: Unknown error reading entropy"))
             return False
