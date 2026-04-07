@@ -16,9 +16,11 @@ from config import load_config, DEFAULT_CONFIG, CONFIG_SEARCH_PATHS
 
 ENTROPY_AVAIL_PATH = "/proc/sys/kernel/random/entropy_avail"
 ENTROPY_POOL_SIZE_PATH = "/proc/sys/kernel/random/poolsize"
+URANDOM_PATH = "/dev/urandom"
 
 READ_RETRIES = 3
 READ_RETRY_DELAY = 0.1
+FALLBACK_ENTROPY_ESTIMATE = 256
 
 
 class EntropyMonitor:
@@ -63,6 +65,24 @@ class EntropyMonitor:
                 continue
 
         return last_error
+
+    def read_entropy_fallback(self):
+        """
+        Attempt to estimate entropy when /proc/sys/kernel/random/entropy_avail
+        is unavailable. Tries reading from /dev/urandom as a fallback indicator.
+        Returns estimated entropy bits or negative error code.
+        """
+        if not os.path.exists(URANDOM_PATH):
+            return -5
+
+        try:
+            with open(URANDOM_PATH, 'rb') as f:
+                sample = f.read(32)
+                if len(sample) == 32:
+                    return FALLBACK_ENTROPY_ESTIMATE
+                return -6
+        except (IOError, OSError):
+            return -7
 
     def read_pool_size(self):
         last_error = None
@@ -165,19 +185,32 @@ class EntropyMonitor:
     def run_once(self):
         available = self.read_entropy_avail()
         pool_size = self.read_pool_size()
+        using_fallback = False
 
         if available < 0:
-            error_messages = {
-                -1: "ERROR: Cannot access entropy_avail - file not found",
-                -2: "ERROR: Permission denied reading entropy_avail",
-                -3: "ERROR: Invalid value in entropy_avail",
-                -4: "ERROR: Failed to read entropy_avail after retries",
-            }
-            print(error_messages.get(available, "ERROR: Unknown error reading entropy"))
-            return False
+            fallback = self.read_entropy_fallback()
+            if fallback > 0:
+                available = fallback
+                using_fallback = True
+            else:
+                error_messages = {
+                    -1: "ERROR: Cannot access entropy_avail - file not found",
+                    -2: "ERROR: Permission denied reading entropy_avail",
+                    -3: "ERROR: Invalid value in entropy_avail",
+                    -4: "ERROR: Failed to read entropy_avail after retries",
+                    -5: "ERROR: No fallback entropy source available (/dev/urandom missing)",
+                    -6: "ERROR: Failed to read from /dev/urandom",
+                    -7: "ERROR: I/O error reading /dev/urandom",
+                }
+                print(error_messages.get(available, "ERROR: Unknown error reading entropy"))
+                return False
 
         percentage = self.get_entropy_percentage(available, pool_size)
         self.log_status(available, pool_size, percentage)
+
+        if using_fallback:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"  ⚠ Using fallback entropy estimate ({FALLBACK_ENTROPY_ESTIMATE} bits)")
 
         if available < self.threshold:
             self.trigger_alert(available)
@@ -235,16 +268,24 @@ class EntropyMonitor:
     def run_check(self):
         available = self.read_entropy_avail()
         pool_size = self.read_pool_size()
+        using_fallback = False
 
         if available < 0:
-            print(f"Error reading entropy: code {available}")
-            return 1
+            fallback = self.read_entropy_fallback()
+            if fallback > 0:
+                available = fallback
+                using_fallback = True
+            else:
+                print(f"Error reading entropy: code {available}")
+                return 1
 
         percentage = self.get_entropy_percentage(available, pool_size)
 
         print(f"Available entropy: {available} bits")
         print(f"Pool size: {pool_size} bits")
         print(f"Usage: {percentage:.1f}%")
+        if using_fallback:
+            print(f"Note: Using fallback entropy estimate")
 
         if available < self.threshold:
             print(f"Status: WARNING - Below threshold ({self.threshold} bits)")
@@ -338,13 +379,19 @@ def main():
     if args.check or args.json:
         available = monitor.read_entropy_avail()
         pool_size = monitor.read_pool_size()
+        using_fallback = False
 
         if available < 0:
-            if args.json:
-                print('{"error": "cannot_read_entropy", "code": ' + str(available) + '}')
+            fallback = monitor.read_entropy_fallback()
+            if fallback > 0:
+                available = fallback
+                using_fallback = True
             else:
-                print(f"Error reading entropy: code {available}")
-            sys.exit(1)
+                if args.json:
+                    print('{"error": "cannot_read_entropy", "code": ' + str(available) + '}')
+                else:
+                    print(f"Error reading entropy: code {available}")
+                sys.exit(1)
 
         percentage = monitor.get_entropy_percentage(available, pool_size)
 
@@ -357,11 +404,15 @@ def main():
                 "threshold": threshold,
                 "status": "ok" if available >= threshold else "low"
             }
+            if using_fallback:
+                output["fallback"] = True
             print(json.dumps(output, indent=2))
         else:
             print(f"Available entropy: {available} bits")
             print(f"Pool size: {pool_size} bits")
             print(f"Usage: {percentage:.1f}%")
+            if using_fallback:
+                print(f"Note: Using fallback entropy estimate")
             if available < threshold:
                 print(f"Status: WARNING - Below threshold ({threshold} bits)")
                 sys.exit(1)
